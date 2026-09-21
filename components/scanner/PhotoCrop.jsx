@@ -1,0 +1,10 @@
+import React,{useRef,useState} from 'react';
+import {Dialog} from './Dialogs.jsx';
+export default function PhotoCrop({photo,onRead,onClose}){
+  const surface=useRef(null),origin=useRef(null);
+  const [rect,setRect]=useState(null);
+  function point(e){const box=surface.current.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-box.left)/box.width)),y:Math.max(0,Math.min(1,(e.clientY-box.top)/box.height))};}
+  function down(e){origin.current=point(e);surface.current.setPointerCapture(e.pointerId);setRect(null);}
+  function move(e){if(!origin.current)return;const p=point(e),o=origin.current;setRect({x:Math.min(o.x,p.x),y:Math.min(o.y,p.y),w:Math.abs(p.x-o.x),h:Math.abs(p.y-o.y)});}
+  return <Dialog title="Select the UPC line" className="photo-dialog" onClose={onClose}><p className="dialog-intro">Drag a tight box around only the numbers beside “UPC Code.” Keep other text outside the box.</p><div ref={surface} className="photo-crop" onPointerDown={down} onPointerMove={move} onPointerUp={e=>{move(e);origin.current=null;}} onPointerCancel={()=>{origin.current=null;}}><img src={photo.url} alt="Your selected paper; drag over the UPC line" draggable={false}/>{rect&&<div className="crop-selection" style={{left:`${rect.x*100}%`,top:`${rect.y*100}%`,width:`${rect.w*100}%`,height:`${rect.h*100}%`}}/>}</div><div className="crop-keyboard"><label>Or choose the area with sliders</label>{[['x','Left',0,95],['y','Top',0,95],['w','Width',5,100],['h','Height',2,100]].map(([key,label,min,max])=><label key={key}>{label}<input type="range" aria-label={`Crop ${label.toLowerCase()}`} min={min} max={max} value={Math.round((rect?.[key]??{x:.1,y:.4,w:.8,h:.2}[key])*100)} onChange={e=>setRect(r=>({...r||{x:.1,y:.4,w:.8,h:.2},[key]:Number(e.target.value)/100}))}/></label>)}</div><div className="dialog-actions"><button className="button" onClick={onClose}>Cancel</button><button className="button primary" disabled={!rect||rect.w<.02||rect.h<.005} onClick={()=>onRead({x:rect.x,y:rect.y,w:Math.min(rect.w,1-rect.x),h:Math.min(rect.h,1-rect.y)})}>Read selected area</button></div></Dialog>;
+}

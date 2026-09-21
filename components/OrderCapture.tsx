@@ -1,0 +1,59 @@
+'use client';
+import React,{useEffect,useRef,useState} from 'react';
+import {Camera,Upload,Focus,Check,RotateCw,SkipForward,ZoomIn,Square} from 'lucide-react';
+import {createWorker,PSM,type Worker} from 'tesseract.js';
+import {Modal,OrderEditor} from '../app/studio';
+import {extractOrder} from '../lib/extract-order.mjs';
+import {chooseDocumentCamera,configureCamera,focusCamera} from './scanner/camera.mjs';
+import type {OrderInput} from '../lib/records';
+
+type Rect={x:number;y:number;w:number;h:number};
+export default function OrderCapture({onClose,onSaved}:{onClose:()=>void;onSaved:()=>void}){
+  const video=useRef<HTMLVideoElement>(null),image=useRef<HTMLImageElement>(null),input=useRef<HTMLInputElement>(null),stream=useRef<MediaStream|null>(null),worker=useRef<Promise<Worker>|null>(null),alive=useRef(true),generation=useRef(0),drag=useRef<{x:number;y:number}|null>(null);
+  const [active,setActive]=useState(false),[starting,setStarting]=useState(false),[devices,setDevices]=useState<MediaDeviceInfo[]>([]),[device,setDevice]=useState(''),[stage,setStage]=useState('ready'),[url,setUrl]=useState(''),[crop,setCrop]=useState<Rect>({x:0,y:0,w:1,h:1}),[files,setFiles]=useState<File[]>([]),[progress,setProgress]=useState(''),[error,setError]=useState(''),[draft,setDraft]=useState<OrderInput|null>(null),[warnings,setWarnings]=useState<string[]>([]),[text,setText]=useState(''),[saved,setSaved]=useState(0),[zoom,setZoom]=useState<any>(null),[zoomValue,setZoomValue]=useState(1);
+  useEffect(()=>{alive.current=true;return()=>{alive.current=false;generation.current++;stream.current?.getTracks().forEach(t=>t.stop());worker.current?.then(w=>w.terminate()).catch(()=>{});};},[]);
+  useEffect(()=>()=>{if(url)URL.revokeObjectURL(url);},[url]);
+  useEffect(()=>{if(files[0])showImage(URL.createObjectURL(files[0]));},[files]);
+  function showImage(next:string){setUrl(next);setCrop({x:0,y:0,w:1,h:1});setStage('crop');setError('');}
+  function stop(){generation.current++;stream.current?.getTracks().forEach(t=>t.stop());stream.current=null;setActive(false);setStarting(false);setZoom(null);}
+  async function start(){const id=++generation.current;setStarting(true);setError('');try{
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error('Open this site in a browser with camera access, or choose photos.');
+    const constraints={width:{ideal:3840},height:{ideal:2160},frameRate:{ideal:24}};
+    let next=await navigator.mediaDevices.getUserMedia({audio:false,video:{...constraints,...(device?{deviceId:{exact:device}}:{facingMode:{ideal:'environment'}})}});
+    if(id!==generation.current){next.getTracks().forEach(t=>t.stop());return;}stream.current=next;
+    const all=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');setDevices(all);
+    const preferred=chooseDocumentCamera(all,device);
+    if(preferred&&preferred.deviceId!==next.getVideoTracks()[0].getSettings().deviceId){next.getTracks().forEach(t=>t.stop());next=await navigator.mediaDevices.getUserMedia({audio:false,video:{...constraints,deviceId:{exact:preferred.deviceId}}});if(id!==generation.current){next.getTracks().forEach(t=>t.stop());return;}stream.current=next;}
+    const track=next.getVideoTracks()[0];await configureCamera(track,{x:.5,y:.5},navigator.mediaDevices.getSupportedConstraints());
+    if(id!==generation.current){next.getTracks().forEach(t=>t.stop());return;}
+    if(video.current){video.current.srcObject=next;await video.current.play();}setActive(true);setDevice(track.getSettings().deviceId||'');
+    const range=(track.getCapabilities() as any).zoom;setZoom(range?.max>range?.min?range:null);setZoomValue((track.getSettings() as any).zoom||1);
+    track.addEventListener('ended',()=>{if(alive.current&&id===generation.current){stop();setError('The camera disconnected. Start it again to continue.');}});
+  }catch(e){stream.current?.getTracks().forEach(t=>t.stop());stream.current=null;if(id===generation.current)setError((e as Error).name==='NotAllowedError'?'Allow camera access, or choose photos from your device.':(e as Error).message);}finally{if(id===generation.current)setStarting(false);}}
+  async function refocus(){const track=stream.current?.getVideoTracks()[0];if(track)await focusCamera(track,{x:.5,y:.5},navigator.mediaDevices.getSupportedConstraints());}
+  function takePhoto(){const v=video.current;if(!v?.videoWidth)return;const canvas=document.createElement('canvas');canvas.width=v.videoWidth;canvas.height=v.videoHeight;canvas.getContext('2d')!.drawImage(v,0,0);canvas.toBlob(blob=>{if(blob&&alive.current)showImage(URL.createObjectURL(blob));},'image/jpeg',.96);}
+  function point(e:React.PointerEvent){const r=e.currentTarget.getBoundingClientRect();return {x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))};}
+  function move(e:React.PointerEvent){if(!drag.current)return;const p=point(e),a=drag.current;setCrop({x:Math.min(p.x,a.x),y:Math.min(p.y,a.y),w:Math.abs(p.x-a.x),h:Math.abs(p.y-a.y)});}
+  function rotate(){const img=image.current;if(!img?.naturalWidth)return;const canvas=document.createElement('canvas');canvas.width=img.naturalHeight;canvas.height=img.naturalWidth;const ctx=canvas.getContext('2d')!;ctx.translate(canvas.width,0);ctx.rotate(Math.PI/2);ctx.drawImage(img,0,0);canvas.toBlob(blob=>{if(blob&&alive.current)showImage(URL.createObjectURL(blob));},'image/jpeg',.96);}
+  async function read(){const img=image.current;if(!img?.naturalWidth){setError('This image could not be opened. Choose a JPEG, PNG, or WebP photo.');return;}setStage('reading');setError('');try{
+    const w=img.naturalWidth*crop.w,h=img.naturalHeight*crop.h,scale=Math.min(1,3000/Math.max(w,h)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(w*scale));canvas.height=Math.max(1,Math.round(h*scale));canvas.getContext('2d')!.drawImage(img,img.naturalWidth*crop.x,img.naturalHeight*crop.y,w,h,0,0,canvas.width,canvas.height);
+    setProgress('Preparing text reader…');
+    if(!worker.current)worker.current=createWorker('eng',1,{workerPath:'/ocr/worker.min.js',corePath:'/ocr',langPath:'/ocr',workerBlobURL:false,cacheMethod:'none',logger:m=>{if(alive.current)setProgress(m.status==='recognizing text'?`Reading paper · ${Math.round(m.progress*100)}%`:'Preparing text reader…');}}).catch(e=>{worker.current=null;throw e;});
+    const engine=await worker.current;if(!alive.current)return;
+    await engine.setParameters({tessedit_pageseg_mode:PSM.SPARSE_TEXT,preserve_interword_spaces:'1'});
+    let result=await engine.recognize(canvas),parsed=extractOrder(result.data.text);
+    if(!parsed.order.patient){await engine.setParameters({tessedit_pageseg_mode:PSM.AUTO});const retry=await engine.recognize(canvas),other=extractOrder(retry.data.text);if(other.order.patient){result=retry;parsed=other;}}
+    if(!alive.current)return;setDraft(parsed.order as OrderInput);setWarnings(parsed.warnings);setText(result.data.text);setStage('review');
+  }catch(e){if(alive.current){setStage('crop');setError('Could not read this photo. Retry, or enter its details manually.');}}}
+  function next(){setDraft(null);setUrl('');setText('');setWarnings([]);setStage('ready');setFiles(items=>items.slice(1));}
+  return <><Modal title="Capture patient orders" wide onClose={onClose}><div className="capture-heading"><p>One paper, one order. Save the reviewed details, then show the next paper.</p><span className="saved-pill"><Check size={15}/>{saved} saved{files.length?` · ${files.length} photos remaining`:''}</span></div>
+    <div className="paper-camera" hidden={stage!=='ready'}><video ref={video} autoPlay playsInline muted aria-label="Patient order camera preview" hidden={!active}/>{active?<div className="paper-guide"><span>Keep the whole paper sharp and inside the frame</span></div>:<div className="camera-empty"><Camera size={46}/><h3>Give your paperwork a clear path</h3><p>Use your laptop camera or your phone’s back camera.</p></div>}</div>
+    {stage==='ready'&&<><div className="capture-actions"><button className="button" onClick={active||starting?stop:start}>{active?<Square size={18}/>:<Camera size={18}/>}{active?'Stop camera':starting?'Cancel camera':'Start camera'}</button>{active&&<><button className="button" onClick={refocus}><Focus size={18}/>Refocus</button><button className="button primary" onClick={takePhoto}><Camera size={18}/>Capture paper</button></>}<button className="button" onClick={()=>input.current?.click()}><Upload size={18}/>Choose photos</button></div><input hidden ref={input} type="file" multiple accept="image/jpeg,image/png,image/webp,image/bmp" aria-label="Choose patient order photos" onChange={e=>{setFiles(Array.from(e.target.files||[]));e.target.value='';}}/>
+    {devices.length>1&&<label className="camera-choice">Camera<select value={device} disabled={active||starting} onChange={e=>setDevice(e.target.value)}>{devices.map((d,i)=><option key={d.deviceId} value={d.deviceId}>{d.label||`Camera ${i+1}`}</option>)}</select></label>}
+    {active&&zoom&&<label className="camera-zoom"><ZoomIn size={18}/>Lens zoom<input type="range" min={zoom.min} max={zoom.max} step={zoom.step||.1} value={zoomValue} onChange={async e=>{const value=Number(e.target.value);setZoomValue(value);try{await stream.current?.getVideoTracks()[0].applyConstraints({advanced:[{zoom:value} as any]});}catch{setError('This camera could not change its zoom. Move the paper closer instead.');}}}/></label>}
+    <p className="capture-tip">For small print, use the phone’s back camera. If paper edges blur, switch off Portrait / Background blur in your device’s camera settings.</p></>}
+    {['crop','reading','review'].includes(stage)&&<div className="paper-source"><div className="paper-crop" onPointerDown={e=>{if(stage!=='crop')return;drag.current=point(e);e.currentTarget.setPointerCapture(e.pointerId);}} onPointerMove={move} onPointerUp={e=>{move(e);drag.current=null;}} onPointerCancel={()=>{drag.current=null;}}><img ref={image} src={url} alt="Captured order for review" draggable={false} onError={()=>setError('This photo format could not be opened. Choose a JPEG, PNG, or WebP image.')}/><div className="paper-selection" style={{left:crop.x*100+'%',top:crop.y*100+'%',width:crop.w*100+'%',height:crop.h*100+'%'}}/></div>{stage==='crop'&&<><p className="capture-tip">Drag a box around the paper to remove the background, or read the entire photo.</p><div className="capture-actions"><button className="button" onClick={rotate}><RotateCw size={18}/>Rotate</button><button className="button" onClick={()=>setCrop({x:0,y:0,w:1,h:1})}>Use whole photo</button><button className="button primary" disabled={crop.w<.03||crop.h<.03} onClick={read}>Read order details</button></div></>}{stage==='reading'&&<div className="reading-progress" role="status">{progress}</div>}</div>}
+    {error&&<p className="error" role="alert">{error}</p>}
+    <div className="modal-actions">{stage==='crop'&&<button className="button" onClick={()=>{setDraft({patient:'',reference:'',upc:'',lab:'',orderedOn:'',dueOn:'',status:'Received',notes:''});setStage('review');}}>Enter details manually</button>}{stage!=='ready'&&stage!=='reading'&&<button className="button" onClick={next}><SkipForward size={17}/>Skip paper</button>}<button className="button complete-button" onClick={onClose}><span className="green-check"><Check size={23}/></span>Finish capture</button></div>
+  </Modal>{stage==='review'&&draft&&<OrderEditor value={draft} history={[]} onClose={()=>setStage('crop')} onSaved={()=>{setSaved(n=>n+1);onSaved();next();}} saveLabel="Save & next paper"><div className="review-source"><img src={url} alt="Original paper; compare extracted details"/><div>{warnings.length>0&&<ul>{warnings.map(w=><li key={w}>{w}</li>)}</ul>}<details><summary>Text read from this paper</summary><pre>{text||'No text was read.'}</pre></details></div></div></OrderEditor>}</>;
+}
